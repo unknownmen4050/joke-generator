@@ -1,0 +1,492 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Flappy Bird — You Control the Poles (Option A)</title>
+  <style>
+    html,body { height:100%; margin:0; display:flex; align-items:center; justify-content:center; background:linear-gradient(#87ceeb,#b0e0e6); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+    #gameWrap { width:min(640px,95vw); max-width:640px; aspect-ratio: 9/16; display:flex; flex-direction:column; gap:6px; }
+    canvas { width:100%; height:100%; background: linear-gradient(#9ad6ff, #6ec0ff); display:block; border-radius:12px; box-shadow: 0 8px 30px rgba(0,0,0,0.25); touch-action: none; }
+    .hud { display:flex; justify-content:space-between; align-items:center; color:#033; font-weight:600; }
+    .hud .left { display:flex; gap:8px; align-items:center; }
+    .btn { background:rgba(255,255,255,0.85); border-radius:8px; padding:6px 10px; cursor:pointer; user-select:none; box-shadow:0 2px 6px rgba(0,0,0,0.12); }
+    .instructions { font-size:12px; color:#012; opacity:0.9; }
+    .overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+    .centerBox { pointer-events:auto; background:rgba(255,255,255,0.95); padding:18px 22px; border-radius:10px; text-align:center; color:#022; box-shadow:0 10px 30px rgba(0,0,0,0.18); }
+    .small { font-size:13px; color:#044; }
+    footer { font-size:11px; color:#033; text-align:center; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div class="hud">
+      <div class="left">
+        <div class="btn" id="startBtn">Start</div>
+        <div class="instructions">Move gap: W/S or ↑/↓ (or drag/tap)</div>
+      </div>
+      <div>
+        <span>Score: </span><span id="score">0</span>
+        <span style="margin-left:8px;color:#045">High: <span id="high">0</span></span>
+      </div>
+    </div>
+
+    <div style="position:relative; flex:1;">
+      <canvas id="c"></canvas>
+      <div class="overlay" id="overlay" style="display:none">
+        <div class="centerBox" id="centerBox">
+          <div id="overlayText">Click to start</div>
+          <div class="small" style="margin-top:8px">You control the pipe gap as it approaches. Let the bird pass!</div>
+          <div style="margin-top:12px">
+            <div class="btn" id="overlayBtn">Play</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <footer>Option A — you control the poles. Bird auto-flaps. Built with Canvas + JS.</footer>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const highEl = document.getElementById('high');
+  const overlay = document.getElementById('overlay');
+  const overlayText = document.getElementById('overlayText');
+  const overlayBtn = document.getElementById('overlayBtn');
+  const startBtn = document.getElementById('startBtn');
+
+  let W=320, H=568; // logical canvas size (will scale)
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+  }
+  // Keep W/H constant; scale in CSS via width/height. Call once.
+  resize();
+
+  // Game state
+  let running = false;
+  let paused = false;
+  let score = 0;
+  let high = parseInt(localStorage.getItem('fb_high') || '0', 10) || 0;
+  highEl.textContent = high;
+
+  // Bird
+  const bird = {
+    x: W*0.28,
+    y: H*0.45,
+    r: 12,
+    vy: 0,
+    gravity: 0.46,
+    flapPower: -7.6,
+    autoFlapInterval: 750, // ms
+    autoFlapTimer: 0
+  };
+
+  // Pipes
+  const pipes = [];
+  const pipeW = 64;
+  const gapHeight = 140;
+  let pipeSpeed = 2.2;
+  let spawnInterval = 1500;
+  let lastSpawn = 0;
+  let gameTime = 0;
+  let activePipeIndex = null; // index in pipes array of the one we control
+
+  // Audio (tiny beeps)
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audio = AudioCtx ? new AudioCtx() : null;
+  function beep(freq=440,dur=0.06,vol=0.12) {
+    if(!audio) return;
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.type='sine'; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(audio.destination);
+    o.start();
+    o.stop(audio.currentTime + dur);
+  }
+
+  // Helpers
+  function randRange(a,b){ return a + Math.random()*(b-a); }
+
+  function spawnPipe() {
+    const minGapTop = 40;
+    const maxGapTop = H - gapHeight - 40;
+    const gapY = randRange(minGapTop, maxGapTop);
+    pipes.push({
+      x: W + 10,
+      w: pipeW,
+      gapY,
+      gapH: gapHeight,
+      passed: false,
+      locked: false // once bird passes we lock or after it passes center?
+    });
+  }
+
+  function reset() {
+    pipes.length = 0;
+    score = 0;
+    scoreEl.textContent = score;
+    bird.x = W*0.28;
+    bird.y = H*0.45;
+    bird.vy = 0;
+    bird.autoFlapTimer = 0;
+    pipeSpeed = 2.2;
+    spawnInterval = 1500;
+    lastSpawn = 0;
+    gameTime = 0;
+    activePipeIndex = null;
+    overlay.style.display = 'flex';
+    overlayText.textContent = 'Click Play to start';
+  }
+
+  function startGame() {
+    running = true;
+    paused = false;
+    overlay.style.display = 'none';
+    lastSpawn = performance.now();
+    gameTime = 0;
+    pipes.length = 0;
+    spawnPipe();
+  }
+
+  // Collision detection (circle vs rect)
+  function circleRectCollision(cx, cy, r, rx, ry, rw, rh){
+    const nearestX = Math.max(rx, Math.min(cx, rx+rw));
+    const nearestY = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx - nearestX;
+    const dy = cy - nearestY;
+    return (dx*dx + dy*dy) < (r*r);
+  }
+
+  // Input: keyboard
+  const input = { up:false, down:false, mouseDown:false, lastMouseY:0, dragging:false };
+  window.addEventListener('keydown', e=>{
+    if(e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') input.up = true;
+    if(e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') input.down = true;
+    if(e.key === ' ' || e.key === 'Spacebar') {
+      if(!running) startGame();
+      else if(!paused) pauseResume();
+    }
+  });
+  window.addEventListener('keyup', e=>{
+    if(e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') input.up = false;
+    if(e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') input.down = false;
+  });
+
+  // Mouse / touch for dragging the active gap
+  function getCanvasPos(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY
+    };
+  }
+  canvas.addEventListener('mousedown', e=>{
+    const pos = getCanvasPos(e.clientX, e.clientY);
+    input.mouseDown = true;
+    input.lastMouseY = pos.y;
+    input.dragging = true;
+    // if not running start
+    if(!running) startGame();
+  });
+  window.addEventListener('mouseup', ()=>{ input.mouseDown = false; input.dragging = false; });
+  canvas.addEventListener('mousemove', e=>{
+    if(!input.dragging) return;
+    const pos = getCanvasPos(e.clientX, e.clientY);
+    const dy = pos.y - input.lastMouseY;
+    input.lastMouseY = pos.y;
+    moveActiveGapBy(dy);
+  });
+
+  canvas.addEventListener('touchstart', e=>{
+    e.preventDefault();
+    const t = e.touches[0];
+    const pos = getCanvasPos(t.clientX, t.clientY);
+    input.mouseDown = true;
+    input.lastMouseY = pos.y;
+    input.dragging = true;
+    if(!running) startGame();
+  }, {passive:false});
+  canvas.addEventListener('touchmove', e=>{
+    e.preventDefault();
+    if(!input.dragging) return;
+    const t = e.touches[0];
+    const pos = getCanvasPos(t.clientX, t.clientY);
+    const dy = pos.y - input.lastMouseY;
+    input.lastMouseY = pos.y;
+    moveActiveGapBy(dy);
+  }, {passive:false});
+  canvas.addEventListener('touchend', e=>{ input.mouseDown=false; input.dragging=false; }, {passive:false});
+
+  function moveActiveGapBy(dy) {
+    if(activePipeIndex === null) return;
+    const p = pipes[activePipeIndex];
+    if(!p || p.locked) return;
+    p.gapY += dy;
+    const minGapTop = 20;
+    const maxGapTop = H - p.gapH - 20;
+    p.gapY = Math.max(minGapTop, Math.min(maxGapTop, p.gapY));
+  }
+
+  function update(dt) {
+    if(!running || paused) return;
+    gameTime += dt;
+    // spawn pipes
+    if(performance.now() - lastSpawn > spawnInterval) {
+      spawnPipe();
+      lastSpawn = performance.now();
+      // accelerate slowly
+      pipeSpeed += 0.03;
+      // slightly reduce gap as time passes
+      // (optional) gapHeight -= 0.5; // commented to keep consistent difficulty
+    }
+
+    // Move pipes
+    for(let i=pipes.length-1;i>=0;i--){
+      const p = pipes[i];
+      p.x -= pipeSpeed;
+      // flag passed
+      if(!p.passed && p.x + p.w < bird.x - bird.r) {
+        p.passed = true;
+        score += 1;
+        scoreEl.textContent = score;
+        beep(880, 0.06, 0.08);
+        if(score > high) {
+          high = score;
+          highEl.textContent = high;
+          localStorage.setItem('fb_high', String(high));
+        }
+      }
+      // remove off-screen pipes
+      if(p.x + p.w < -20) pipes.splice(i,1);
+    }
+
+    // choose active pipe: the pipe with smallest x > bird.x (the next approaching one)
+    activePipeIndex = null;
+    let minX = Infinity;
+    for(let i=0;i<pipes.length;i++){
+      const p = pipes[i];
+      if(p.x + p.w > bird.x && p.x < minX) {
+        minX = p.x;
+        activePipeIndex = i;
+      }
+    }
+
+    // Player control: keys move gap of active pipe (but only while it's ahead)
+    if(activePipeIndex !== null) {
+      const p = pipes[activePipeIndex];
+      if(!p.locked) {
+        if(input.up) p.gapY -= 3.8 * (dt/16);
+        if(input.down) p.gapY += 3.8 * (dt/16);
+        // clamp
+        const minGapTop = 20;
+        const maxGapTop = H - p.gapH - 20;
+        p.gapY = Math.max(minGapTop, Math.min(maxGapTop, p.gapY));
+      }
+    }
+
+    // Bird auto flap (gives occasional upward impulse)
+    bird.autoFlapTimer += dt;
+    if(bird.autoFlapTimer > bird.autoFlapInterval) {
+      bird.autoFlapTimer = 0;
+      // vary flap slightly for unpredictability
+      bird.vy = bird.flapPower + (Math.random()*1.8 - 0.9);
+    }
+
+    // physics
+    bird.vy += bird.gravity;
+    bird.y += bird.vy;
+
+    // collisions with top/bottom:
+    if(bird.y - bird.r <= 0 || bird.y + bird.r >= H) {
+      // hit ground/sky
+      gameOver();
+      return;
+    }
+
+    // check collision with pipes
+    for(const p of pipes){
+      // top rect: x -> x+w, y: 0 -> gapY
+      if(circleRectCollision(bird.x, bird.y, bird.r, p.x, 0, p.w, p.gapY) ||
+         circleRectCollision(bird.x, bird.y, bird.r, p.x, p.gapY + p.gapH, p.w, H - (p.gapY + p.gapH))) {
+        gameOver();
+        return;
+      }
+    }
+  }
+
+  function gameOver() {
+    running = false;
+    overlay.style.display = 'flex';
+    overlayText.textContent = 'Game Over — Score: ' + score;
+    overlayBtn.textContent = 'Restart';
+    beep(160, 0.18, 0.16);
+  }
+
+  function pauseResume() {
+    paused = !paused;
+    overlay.style.display = paused ? 'flex' : 'none';
+    overlayText.textContent = paused ? 'Paused' : '';
+  }
+
+  // Render
+  function draw() {
+    // background gradient already via CSS; we draw scene elements
+    ctx.clearRect(0,0,W,H);
+
+    // sky (subtle)
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, '#9ad6ff'); g.addColorStop(1, '#6ec0ff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // ground strip
+    ctx.fillStyle = '#6bb64b';
+    ctx.fillRect(0, H - 28, W, 28);
+
+    // draw pipes
+    for(let i=0;i<pipes.length;i++){
+      const p = pipes[i];
+      // highlight if active
+      const isActive = (i === activePipeIndex);
+      // top pipe
+      ctx.fillStyle = '#2e8b2e';
+      ctx.fillRect(p.x, 0, p.w, p.gapY);
+      // bottom pipe
+      ctx.fillRect(p.x, p.gapY + p.gapH, p.w, H - (p.gapY + p.gapH));
+      // darker rims
+      ctx.fillStyle = 'rgba(0,0,0,0.08)';
+      ctx.fillRect(p.x, 0, p.w, Math.min(10, p.gapY));
+      ctx.fillRect(p.x, p.gapY + p.gapH, p.w, Math.min(10, H - (p.gapY + p.gapH)));
+
+      if(isActive) {
+        // draw a glowing highlight around the gap
+        ctx.strokeStyle = 'rgba(255,240,120,0.95)';
+        ctx.lineWidth = 3;
+        roundRectStroke(ctx, p.x-2, p.gapY-8, p.w+4, p.gapH+16, 8);
+        // small arrow showing control
+        ctx.fillStyle = 'rgba(255,240,120,0.95)';
+        ctx.beginPath();
+        const ax = Math.max(8, p.x - 28);
+        const ay = p.gapY + p.gapH/2;
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(ax+16, ay-8);
+        ctx.lineTo(ax+16, ay+8);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+
+    // bird (simple circle + eye)
+    ctx.save();
+    ctx.translate(bird.x, bird.y);
+    // tilt by vy
+    const tilt = Math.max(-0.6, Math.min(0.6, bird.vy / 12));
+    ctx.rotate(tilt);
+    // body
+    ctx.fillStyle = '#ffd54a';
+    ctx.beginPath(); ctx.arc(0,0,bird.r,0,Math.PI*2); ctx.fill();
+    // wing
+    ctx.fillStyle = '#ffb74d';
+    ctx.beginPath(); ctx.ellipse(-2, 4, 8, 4, -0.6, 0, Math.PI*2); ctx.fill();
+    // eye
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(4, -3, 2.6, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // HUD (score already in HTML)
+    // small hint: active pipe gap
+    if(activePipeIndex !== null) {
+      const p = pipes[activePipeIndex];
+      ctx.fillStyle = 'rgba(0,0,0,0.06)';
+      ctx.fillRect(10, 10, 170, 38);
+      ctx.fillStyle = '#012';
+      ctx.font = '13px system-ui,Segoe UI,Roboto';
+      ctx.fillText('Active pipe gap control', 18, 28);
+      ctx.fillStyle = '#036';
+      ctx.font = '12px system-ui,Segoe UI,Roboto';
+      ctx.fillText('Use W/S or ↑/↓ or drag the gap', 18, 44);
+    }
+  }
+
+  function roundRectStroke(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // Main loop
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // UI bindings
+  overlayBtn.addEventListener('click', () => {
+    if(!running) {
+      startGame();
+      overlay.style.display = 'none';
+    } else {
+      // restart
+      reset();
+      startGame();
+      overlay.style.display = 'none';
+    }
+  });
+  startBtn.addEventListener('click', () => {
+    if(!running) {
+      startGame();
+    } else {
+      reset();
+    }
+  });
+
+  // initialize
+  reset();
+  requestAnimationFrame(loop);
+
+  // make canvas crisp on high-DPI
+  function applyHiDPI() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    ctx.setTransform(dpr * (W/canvas.width), 0, 0, dpr * (H/canvas.height), 0, 0);
+    // Reset coordinate system: we'll keep logical W x H, so set transform to scale logical coords to actual
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  }
+  // Resize handler: we keep logical canvas at W x H and scale in CSS, but we update transform to match pixel ratio
+  function onResize() {
+    // compute physical pixel size and set transform
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * (window.devicePixelRatio || 1));
+    canvas.height = Math.round(rect.height * (window.devicePixelRatio || 1));
+    // scale logical coords to pixel dims
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  }
+  // call once and on resize
+  onResize();
+  window.addEventListener('resize', onResize);
+
+})();
+</script>
+</body>
+</html>
